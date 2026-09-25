@@ -1,0 +1,781 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TRÄ-TORE 3D</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; background: #000; overflow: hidden;
+    font-family: 'Courier New', monospace;
+    image-rendering: pixelated;
+  }
+  #wrap {
+    position: relative;
+    width: 100vw; height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+    background: #000;
+  }
+  canvas {
+    background: #000;
+    image-rendering: pixelated;
+    box-shadow: 0 0 40px #ff8800;
+    border: 4px solid #444;
+  }
+  #hud {
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    display: flex;
+    justify-content: center;
+  }
+  #overlay {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    display: flex; align-items: center; justify-content: center;
+    flex-direction: column;
+    color: #ffcc00;
+    text-shadow: 3px 3px 0 #000;
+    text-align: center;
+    background: rgba(0,0,0,0.85);
+    z-index: 10;
+  }
+  #overlay h1 {
+    font-size: 48px;
+    letter-spacing: 4px;
+    margin-bottom: 10px;
+    color: #ff3300;
+  }
+  #overlay p { font-size: 18px; max-width: 600px; line-height: 1.6; }
+  #overlay button {
+    margin-top: 20px;
+    font-family: inherit;
+    font-size: 20px;
+    padding: 12px 30px;
+    background: #ff8800;
+    border: 4px solid #ffcc00;
+    color: #000;
+    cursor: pointer;
+    font-weight: bold;
+  }
+  #overlay button:hover { background: #ffcc00; }
+  #crosshair {
+    position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%,-50%);
+    color: #0f0; font-size: 20px; pointer-events: none;
+    text-shadow: 0 0 4px #000;
+  }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="640" height="400"></canvas>
+  <div id="crosshair">+</div>
+  <div id="overlay">
+    <h1>TRÄ-TORE 3D</h1>
+    <p>
+      Du är TRÄ-TORE, skolans mest legendariska slöjdlärare.<br>
+      Korridorerna vimlar av upproriska TRÄBITAR.<br>
+      Din RUBANK är allt du behöver.<br><br>
+      <b>WASD</b> = rör dig &nbsp;|&nbsp; <b>Mus</b> = titta &nbsp;|&nbsp; <b>Vänsterklick / Mellanslag</b> = HYVLA &nbsp;|&nbsp; <b>M</b> = musik av/på<br>
+      Klicka i spelet för att låsa musen. ESC för att släppa.
+    </p>
+    <div style="margin: 10px 0; font-size: 15px;">
+      <b>Styrning med vänster/höger pil:</b><br>
+      <label style="cursor:pointer; margin-right:18px;">
+        <input type="radio" name="controlScheme" value="turn" checked> Klassisk (vänder blicken)
+      </label>
+      <label style="cursor:pointer;">
+        <input type="radio" name="controlScheme" value="strafe"> Strife (glider i sidled)
+      </label>
+    </div>
+    <button id="startBtn">STARTA LEKTIONEN</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const overlay = document.getElementById('overlay');
+  const startBtn = document.getElementById('startBtn');
+  const menuHTML = overlay.innerHTML; // sparad kopia av startskärmen, för att kunna återgå dit
+
+  // ---------- ljud (enkla WebAudio-beeps, DOS-chiptune-känsla) ----------
+  let actx;
+  function beep(freq, dur, type='square', vol=0.15, delay=0) {
+    if (!actx) return;
+    const o = actx.createOscillator();
+    const g = actx.createGain();
+    o.type = type; o.frequency.value = freq;
+    g.gain.value = vol;
+    o.connect(g); g.connect(actx.destination);
+    const t = actx.currentTime + delay;
+    o.start(t);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    o.stop(t + dur);
+  }
+  function sfxSwing() { beep(150, 0.08, 'square', 0.2); beep(90, 0.1, 'square', 0.15, 0.03); }
+  function sfxHit() { beep(400, 0.05, 'sawtooth', 0.2); beep(200, 0.1, 'square', 0.2, 0.02); }
+  function sfxHurt() { beep(80, 0.2, 'sawtooth', 0.25); }
+  function sfxPickup() { beep(700, 0.05, 'square', 0.15); beep(1000, 0.08, 'square', 0.15, 0.05); }
+  function sfxWin() { [523,659,784,1047].forEach((f,i)=>beep(f,0.15,'square',0.2,i*0.12)); }
+  function sfxLose() { [300,250,200,150].forEach((f,i)=>beep(f,0.2,'sawtooth',0.2,i*0.15)); }
+
+  // ---------- bakgrundsmusik: egenkomponerad loop, trä/marimba möter industriell synth-bas
+  // (en liten nick åt känslan i Duke Nukem 3D:s första nivå - drivande baslinje + perkussion) ----------
+  let musicTimeoutId = null;
+  let musicOn = true;
+  // Del A: samma lugnare "trä-marimba"-fras som tidigare
+  const phraseA = [
+    { f: 196.0, d: 0.22 }, // G3
+    { f: 220.0, d: 0.16 }, // A3
+    { f: 246.9, d: 0.16 }, // B3
+    { f: 220.0, d: 0.16 }, // A3
+    { f: 261.6, d: 0.30 }, // C4
+    { f: 196.0, d: 0.16 }, // G3
+    { f: 246.9, d: 0.16 }, // B3
+    { f: 220.0, d: 0.34 }, // A3 (vilopunkt)
+  ];
+  // Del B: mer energisk, synkoperad fras - lite "action level"-känsla
+  const phraseB = [
+    { f: 293.7, d: 0.14 }, // D4
+    { f: 293.7, d: 0.14 }, // D4
+    { f: 349.2, d: 0.20 }, // F4
+    { f: 293.7, d: 0.14 }, // D4
+    { f: 392.0, d: 0.24 }, // G4
+    { f: 349.2, d: 0.14 }, // F4
+    { f: 293.7, d: 0.14 }, // D4
+    { f: 246.9, d: 0.14 }, // B3
+    { f: 220.0, d: 0.34 }, // A3 (vilopunkt, leder tillbaka till del A)
+  ];
+  const musicRiff = [...phraseA, ...phraseB];
+  function scheduleMusicLoop() {
+    let t = 0;
+    musicRiff.forEach((n, i) => {
+      if (musicOn) {
+        beep(n.f, n.d * 0.9, 'triangle', 0.055, t); // xylofon-aktig melodi
+        beep(n.f / 4, n.d * 0.7, 'square', 0.03, t); // driven, industriell synth-bas en oktav+ under
+        if (i % 2 === 0) beep(70, 0.05, 'square', 0.03, t); // dovt trä-"tonk" på vartannat slag
+      }
+      t += n.d;
+    });
+    musicTimeoutId = setTimeout(scheduleMusicLoop, t * 1000);
+  }
+  function startMusic() {
+    if (musicTimeoutId) return; // redan igång, starta inte en till loop ovanpå
+    scheduleMusicLoop();
+  }
+  document.addEventListener('keydown', e => {
+    if (e.code === 'KeyM') musicOn = !musicOn;
+  });
+
+  // ---------- karta ----------
+  // 1 = vägg, 0 = golv, 2 = mål (dörren till lärarrummet)
+  // Kartan byggs programmatiskt: en stor AULA, korridorer, och några mindre rum.
+  const MAPW = 20, MAPH = 15;
+  const map = [];
+  for (let y = 0; y < MAPH; y++) {
+    map.push(new Array(MAPW).fill(1)); // börja med allt som vägg
+  }
+  function carveRoom(x0, y0, x1, y1) {
+    // öppnar upp ett rektangulärt golvområde (inklusive kanter x0..x1, y0..y1)
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        if (y >= 0 && y < MAPH && x >= 0 && x < MAPW) map[y][x] = 0;
+      }
+    }
+  }
+  function setCell(x, y, v) { map[y][x] = v; }
+
+  // AULAN - det stora rummet
+  carveRoom(2, 2, 10, 8);
+
+  // Korridor öster ut från aulan
+  carveRoom(11, 4, 14, 5);
+
+  // Mindre rum nordost (med kruka + stol)
+  carveRoom(15, 1, 18, 6);
+
+  // Korridor söderut från aulan
+  carveRoom(4, 9, 5, 12);
+
+  // Mindre rum söder (med bord)
+  carveRoom(2, 12, 9, 13);
+
+  // Korridor österut från södra rummet, mot lärarrummet
+  carveRoom(9, 12, 16, 12);
+
+  // Litet slutrum (lärarrummet) med målet
+  carveRoom(15, 10, 18, 13);
+  setCell(18, 12, 2); // MÅL: dörren till lärarrummet, längst i sydost
+
+  // En extra sidokorridor som knyter ihop nordöstra rummet med lärarrummet
+  carveRoom(17, 6, 17, 10);
+  function isWall(x, y) {
+    const mx = Math.floor(x), my = Math.floor(y);
+    if (mx < 0 || my < 0 || mx >= MAPW || my >= MAPH) return true;
+    return map[my][mx] === 1;
+  }
+  function propBlocks(x, y) {
+    for (const p of props) {
+      if (p.type === 'sign') continue; // rent visuell, blockerar inte vägen till målet
+      const dx = x - p.x, dy = y - p.y;
+      if (Math.sqrt(dx*dx + dy*dy) < p.radius + 0.25) return true;
+    }
+    return false;
+  }
+  function isGoal(x, y) {
+    const mx = Math.floor(x), my = Math.floor(y);
+    if (mx < 0 || my < 0 || mx >= MAPW || my >= MAPH) return false;
+    return map[my][mx] === 2;
+  }
+
+  // ---------- spelare ----------
+  const player = { x: 4.5, y: 4.5, dir: 0, fov: Math.PI/3, moveSpeed: 2.6, rotSpeed: 2.4 };
+  let controlScheme = 'turn'; // 'turn' = pilar vänder, 'strafe' = pilar glider i sidled (Strife-stil)
+
+  // ---------- fiender (träbitar) ----------
+  const enemyNames = ['BALSA-BUSE', 'SPÅNPANIK', 'FANER-FURA', 'KVIST-KNODD', 'PLYWOOD-PÖBEL'];
+  let enemies = [];
+  function spawnEnemies() {
+    enemies = [];
+    // Aulan (spelarens startrum) hålls fiendefri - alla fiender finns i
+    // rummen/korridorerna runt omkring, så man hinner lära sig kontrollerna först.
+    const spots = [[17.5,2.5],[16.5,5.5],[5.5,10.5],[5.5,11.5],[4.5,12.5],[7.5,12.5],[13.5,12.5],[17.5,11.5]];
+    spots.forEach((s,i) => {
+      enemies.push({
+        x: s[0], y: s[1], alive: true,
+        name: enemyNames[i % enemyNames.length],
+        hp: 2, hitFlash: 0, awake: false
+      });
+    });
+  }
+
+  // ---------- komiska rekvisita (kruka, stol, bord) ----------
+  // typ: 'plant' | 'chair' | 'table'. radius = kollisionsradie.
+  let props = [];
+  function spawnProps() {
+    props = [
+      { type: 'plant', x: 16.5, y: 1.7, radius: 0.3 },   // träd i blomkruka, hörnet av NO-rummet
+      { type: 'chair', x: 17.5, y: 5.5, radius: 0.25 },  // stol i samma rum
+      { type: 'table', x: 5.5, y: 12.7, radius: 0.4 },   // bord i södra rummet
+      { type: 'chair', x: 3.0, y: 13.0, radius: 0.25 },  // stol vid bordet
+      { type: 'plant', x: 9.5, y: 2.3, radius: 0.3 },    // en kruka i ett hörn av aulan
+      { type: 'sign', x: 18.5, y: 12.0, radius: 0 },     // dörrskylt vid målet - blockerar inte
+    ];
+  }
+
+  let score = 0;
+  let health = 100;
+  let gameState = 'menu'; // menu, playing, won, lost
+  let swingTimer = 0;
+  let hurtFlash = 0;
+  let messages = [];
+
+  function addMessage(text, life=90) {
+    messages.push({text, life});
+  }
+
+  // ---------- input ----------
+  const keys = {};
+  document.addEventListener('keydown', e => {
+    keys[e.code] = true;
+    if (e.code === 'Space' && gameState === 'playing') { e.preventDefault(); swing(); }
+  });
+  document.addEventListener('keyup', e => { keys[e.code] = false; });
+
+  let mouseLocked = false;
+  canvas.addEventListener('click', () => {
+    if (gameState === 'playing') {
+      canvas.requestPointerLock();
+      swing();
+    }
+  });
+  document.addEventListener('pointerlockchange', () => {
+    mouseLocked = document.pointerLockElement === canvas;
+  });
+  document.addEventListener('mousemove', e => {
+    if (mouseLocked && gameState === 'playing') {
+      player.dir += e.movementX * 0.0025;
+    }
+  });
+
+  function swing() {
+    if (swingTimer > 0 || gameState !== 'playing') return;
+    swingTimer = 20;
+    sfxSwing();
+    // hitta träbit rakt fram inom kort räckvidd
+    let hitSomething = false;
+    for (const en of enemies) {
+      if (!en.alive) continue;
+      const dx = en.x - player.x, dy = en.y - player.y;
+      const dist = Math.sqrt(dx*dx + dy*dy);
+      if (dist > 1.3) continue;
+      const angleTo = Math.atan2(dy, dx);
+      let diff = angleTo - player.dir;
+      while (diff > Math.PI) diff -= Math.PI*2;
+      while (diff < -Math.PI) diff += Math.PI*2;
+      if (Math.abs(diff) < 0.5) {
+        en.hp -= 1;
+        en.hitFlash = 10;
+        hitSomething = true;
+        if (en.hp <= 0) {
+          en.alive = false;
+          score += 100;
+          addMessage(en.name + ' HYVLAD TILL SPÅN! +100');
+          sfxHit();
+        } else {
+          addMessage(en.name + ' KNIRKAR...');
+          sfxHit();
+        }
+        break;
+      }
+    }
+    if (!hitSomething) {
+      // whiff
+    }
+  }
+
+  // ---------- uppdatering ----------
+  let lastTime = performance.now();
+  function update(dt) {
+    if (gameState !== 'playing') return;
+
+    if (swingTimer > 0) swingTimer--;
+    if (hurtFlash > 0) hurtFlash--;
+    messages = messages.filter(m => (m.life -= 1) > 0);
+
+    let moveX = 0, moveY = 0;
+    const forward = (keys['KeyW'] || keys['ArrowUp']) ? 1 : 0;
+    const back = (keys['KeyS'] || keys['ArrowDown']) ? 1 : 0;
+    const left = (keys['KeyA']) ? 1 : 0;
+    const right = (keys['KeyD']) ? 1 : 0;
+    const turnLeft = keys['ArrowLeft'] ? 1 : 0;
+    const turnRight = keys['ArrowRight'] ? 1 : 0;
+
+    let strafeFromArrows = 0;
+    if (controlScheme === 'strafe') {
+      // pilarna glider i sidled, blicken styrs bara av musen (eller inte alls)
+      strafeFromArrows = turnRight - turnLeft;
+    } else {
+      // klassiskt: pilarna vänder blicken - oavsett om musen är låst eller ej
+      player.dir += (turnRight - turnLeft) * player.rotSpeed * dt;
+    }
+
+    const fwd = forward - back;
+    const strafe = (right - left) + strafeFromArrows;
+    const sin = Math.sin(player.dir), cos = Math.cos(player.dir);
+
+    moveX = (cos * fwd - sin * strafe) * player.moveSpeed * dt;
+    moveY = (sin * fwd + cos * strafe) * player.moveSpeed * dt;
+
+    const pad = 0.2;
+    let tryX = player.x + moveX, tryY = player.y + moveY;
+    const blockedX = isWall(tryX + Math.sign(moveX)*pad, player.y) || propBlocks(tryX, player.y);
+    const blockedY = isWall(player.x, tryY + Math.sign(moveY)*pad) || propBlocks(player.x, tryY);
+    if (!blockedX) player.x += moveX;
+    if (!blockedY) player.y += moveY;
+
+    if (isGoal(player.x, player.y)) {
+      gameState = 'won';
+      sfxWin();
+      showEndScreen(true);
+    }
+
+    // fiender rör sig sakta mot spelaren och gör skada på nära håll
+    for (const en of enemies) {
+      if (!en.alive) continue;
+      if (en.hitFlash > 0) en.hitFlash--;
+      const dx = player.x - en.x, dy = player.y - en.y;
+      const dist = Math.sqrt(dx*dx + dy*dy);
+
+      // fienden "vaknar" först när spelaren kommer tillräckligt nära,
+      // så man slipper bli jagad från alla håll direkt vid start
+      if (!en.awake) {
+        if (dist < 3.5) { en.awake = true; }
+        else continue; // sover fortfarande, gör ingenting
+      }
+
+      if (dist < 6 && dist > 0.6) {
+        const spd = 0.6 * dt;
+        const nx = en.x + (dx/dist) * spd;
+        const ny = en.y + (dy/dist) * spd;
+        if (!isWall(nx, en.y)) en.x = nx;
+        if (!isWall(en.x, ny)) en.y = ny;
+      } else if (dist <= 0.6) {
+        health -= 15 * dt;
+        hurtFlash = 10;
+        if (Math.random() < 0.02) sfxHurt();
+        if (health <= 0) {
+          health = 0;
+          gameState = 'lost';
+          sfxLose();
+          showEndScreen(false);
+        }
+      }
+    }
+  }
+
+  // ---------- raycasting-rendering ----------
+  function castRays() {
+    const numRays = W;
+    const halfFov = player.fov / 2;
+    for (let i = 0; i < numRays; i++) {
+      const rayAngle = player.dir - halfFov + (i / numRays) * player.fov;
+      const sin = Math.sin(rayAngle), cos = Math.cos(rayAngle);
+      let dist = 0;
+      const step = 0.02;
+      let hitX = player.x, hitY = player.y;
+      let hit = false;
+      let wallType = 1;
+      while (dist < 20 && !hit) {
+        dist += step;
+        hitX = player.x + cos * dist;
+        hitY = player.y + sin * dist;
+        if (isWall(hitX, hitY)) { hit = true; wallType = 1; }
+      }
+      // korrigera fisheye
+      const correctedDist = dist * Math.cos(rayAngle - player.dir);
+      const wallHeight = Math.min(H, (H / correctedDist) * 0.9);
+
+      // skugga baserat på avstånd + checkerboard för DOS-textur-känsla
+      const shade = Math.max(0.15, 1 - correctedDist / 10);
+      const cellX = Math.floor(hitX), cellY = Math.floor(hitY);
+      const brickPattern = ((Math.floor(hitX*3) + Math.floor(hitY*3)) % 2 === 0) ? 1 : 0.85;
+
+      const r = Math.floor(120 * shade * brickPattern);
+      const g = Math.floor(70 * shade * brickPattern);
+      const b = Math.floor(30 * shade * brickPattern);
+      ctx.fillStyle = `rgb(${r},${g},${b})`;
+      ctx.fillRect(i, (H - wallHeight) / 2, 1, wallHeight);
+
+      zbuffer[i] = correctedDist;
+    }
+  }
+
+  const zbuffer = new Array(W).fill(20);
+
+  function renderScene() {
+    // golv och tak
+    const grad1 = ctx.createLinearGradient(0,0,0,H/2);
+    grad1.addColorStop(0, '#1a0a2e');
+    grad1.addColorStop(1, '#3a1a4e');
+    ctx.fillStyle = grad1;
+    ctx.fillRect(0, 0, W, H/2);
+
+    const grad2 = ctx.createLinearGradient(0,H/2,0,H);
+    grad2.addColorStop(0, '#3a2a1a');
+    grad2.addColorStop(1, '#1a1208');
+    ctx.fillStyle = grad2;
+    ctx.fillRect(0, H/2, W, H/2);
+
+    castRays();
+    renderProps();
+    renderSprites();
+    renderWeapon();
+  }
+
+  function renderProps() {
+    const visible = props.map(p => {
+      const dx = p.x - player.x, dy = p.y - player.y;
+      const dist = Math.sqrt(dx*dx + dy*dy);
+      let angleTo = Math.atan2(dy, dx) - player.dir;
+      while (angleTo > Math.PI) angleTo -= Math.PI*2;
+      while (angleTo < -Math.PI) angleTo += Math.PI*2;
+      return {p, dist, angleTo};
+    }).sort((a,b) => b.dist - a.dist);
+
+    for (const {p, dist, angleTo} of visible) {
+      if (Math.abs(angleTo) > player.fov/2 + 0.3) continue;
+      const screenX = (0.5 + angleTo / player.fov) * W;
+      const size = Math.min(H, (H / dist) * 0.6);
+      const col = Math.floor(screenX);
+      if (col < 0 || col >= W) continue;
+      if (dist > zbuffer[Math.max(0,Math.min(W-1,col))] + 0.3) continue;
+
+      // golvlinjen vid detta avstånd (samma princip som väggarnas nederkant),
+      // så att möbler står på golvet istället för att sväva mitt i bilden
+      const wallHeightHere = Math.min(H, (H / dist) * 0.9);
+      const floorY = (H + wallHeightHere) / 2;
+      const objTop = floorY - size;
+      ctx.save();
+      ctx.translate(screenX, objTop + size/2);
+
+      if (p.type === 'plant') {
+        // blomkruka med löjligt yvigt "träd" - krukan står i botten av sprite-rutan
+        ctx.fillStyle = '#a35c2b';
+        ctx.beginPath();
+        ctx.moveTo(-size*0.18, size*0.36);
+        ctx.lineTo(size*0.18, size*0.36);
+        ctx.lineTo(size*0.13, size*0.5);
+        ctx.lineTo(-size*0.13, size*0.5);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = '#6b3a12';
+        ctx.lineWidth = Math.max(1, size*0.02);
+        ctx.stroke();
+        ctx.fillStyle = '#5a3418';
+        ctx.fillRect(-size*0.03, -size*0.1, size*0.06, size*0.46);
+        ctx.fillStyle = '#2f7d32';
+        [[-0.16,-0.2],[0.16,-0.2],[0,-0.42],[-0.1,-0.1],[0.1,-0.1]].forEach(([ox,oy]) => {
+          ctx.beginPath();
+          ctx.ellipse(size*ox, size*oy, size*0.16, size*0.13, 0, 0, Math.PI*2);
+          ctx.fill();
+        });
+      } else if (p.type === 'chair') {
+        // enkel trästol, sedd lite snett framifrån - solid ryggstöd (ingen "mål"-öppning),
+        // ben som når ner till golvet i botten av sprite-rutan
+        const floorEdge = size * 0.5;
+        // bakre ben (lite kortare/indragna, för perspektivkänsla)
+        ctx.fillStyle = '#7a5220';
+        ctx.fillRect(-size*0.10, size*0.02, size*0.05, floorEdge - size*0.02);
+        ctx.fillRect(size*0.05, size*0.02, size*0.05, floorEdge - size*0.02);
+        // ryggstöd - ett massivt bräde, inte två separata stolpar
+        ctx.fillStyle = '#c98a4b';
+        ctx.fillRect(-size*0.17, -size*0.42, size*0.34, size*0.34);
+        // ett par ribbor i ryggstödet för lite textur
+        ctx.strokeStyle = '#8a5a2b';
+        ctx.lineWidth = Math.max(1, size*0.015);
+        ctx.beginPath();
+        ctx.moveTo(-size*0.17, -size*0.28); ctx.lineTo(size*0.17, -size*0.28);
+        ctx.moveTo(-size*0.17, -size*0.14); ctx.lineTo(size*0.17, -size*0.14);
+        ctx.stroke();
+        // sits
+        ctx.fillStyle = '#c98a4b';
+        ctx.fillRect(-size*0.19, -size*0.08, size*0.38, size*0.1);
+        // främre ben, ner till golvet
+        ctx.fillStyle = '#8a5a2b';
+        ctx.fillRect(-size*0.17, size*0.02, size*0.05, floorEdge - size*0.02);
+        ctx.fillRect(size*0.12, size*0.02, size*0.05, floorEdge - size*0.02);
+      } else if (p.type === 'table') {
+        // klumpigt slöjdbord, ben ner till golvet
+        const floorEdge = size * 0.5;
+        ctx.fillStyle = '#a3702f';
+        ctx.fillRect(-size*0.35, -size*0.1, size*0.7, size*0.12); // bordsskiva
+        ctx.fillStyle = '#7a5220';
+        [-0.28, 0.22].forEach(ox => {
+          ctx.fillRect(size*ox, size*0.02, size*0.06, floorEdge - size*0.02); // ben
+        });
+      } else if (p.type === 'sign') {
+        // dörrskylt till lärarrummet, med blinkande röd text - en nick åt "REDRUM"
+        const floorEdge = size * 0.5;
+        // dörren
+        ctx.fillStyle = '#5a3418';
+        ctx.fillRect(-size*0.28, -size*0.48, size*0.56, floorEdge + size*0.48);
+        ctx.strokeStyle = '#2f1a0a';
+        ctx.lineWidth = Math.max(1, size*0.02);
+        ctx.strokeRect(-size*0.28, -size*0.48, size*0.56, floorEdge + size*0.48);
+        ctx.fillStyle = '#c9a86b';
+        ctx.beginPath();
+        ctx.arc(size*0.18, size*0.02, size*0.025, 0, Math.PI*2);
+        ctx.fill();
+        // skylten
+        const blink = 0.55 + 0.45 * Math.sin(performance.now() / 260);
+        ctx.fillStyle = '#1a1208';
+        ctx.fillRect(-size*0.22, -size*0.3, size*0.44, size*0.16);
+        ctx.fillStyle = `rgba(220,20,20,${blink.toFixed(2)})`;
+        ctx.font = `bold ${Math.max(6, size*0.09)}px monospace`;
+        ctx.textAlign = 'center';
+        ctx.fillText('LÄRARRUM', 0, -size*0.2);
+      }
+      ctx.restore();
+    }
+  }
+
+  function renderSprites() {
+    // sortera fiender efter avstånd, bakre först
+    const visible = enemies.filter(e => e.alive).map(e => {
+      const dx = e.x - player.x, dy = e.y - player.y;
+      const dist = Math.sqrt(dx*dx + dy*dy);
+      let angleTo = Math.atan2(dy, dx) - player.dir;
+      while (angleTo > Math.PI) angleTo -= Math.PI*2;
+      while (angleTo < -Math.PI) angleTo += Math.PI*2;
+      return {e, dist, angleTo};
+    }).sort((a,b) => b.dist - a.dist);
+
+    for (const {e, dist, angleTo} of visible) {
+      if (Math.abs(angleTo) > player.fov/2 + 0.3) continue;
+      const screenX = (0.5 + angleTo / player.fov) * W;
+      const size = Math.min(H, (H / dist) * 0.6);
+      const col = Math.floor(screenX);
+      if (col < 0 || col >= W) continue;
+      if (dist > zbuffer[Math.max(0,Math.min(W-1,col))] + 0.3) continue; // bakom vägg
+
+      const top = (H - size) / 2;
+      // enkel "sprite": rektangulär träbit med ansikte
+      ctx.save();
+      ctx.translate(screenX, top + size/2);
+
+      const flash = e.hitFlash > 0;
+      ctx.fillStyle = flash ? '#ffffff' : '#c98a4b';
+      ctx.fillRect(-size*0.22, -size*0.35, size*0.44, size*0.7);
+      // träringar
+      ctx.strokeStyle = flash ? '#ffcc00' : '#8a5a2b';
+      ctx.lineWidth = Math.max(1, size*0.02);
+      for (let r = 1; r <= 3; r++) {
+        ctx.beginPath();
+        ctx.ellipse(0, -size*0.35 + r*size*0.16, size*0.15, size*0.05, 0, 0, Math.PI*2);
+        ctx.stroke();
+      }
+      // ögon
+      ctx.fillStyle = '#000';
+      ctx.fillRect(-size*0.1, -size*0.05, size*0.06, size*0.06);
+      ctx.fillRect(size*0.04, -size*0.05, size*0.06, size*0.06);
+      // arg mun
+      ctx.strokeStyle = '#000';
+      ctx.beginPath();
+      ctx.moveTo(-size*0.08, size*0.12);
+      ctx.lineTo(size*0.08, size*0.12);
+      ctx.stroke();
+      ctx.restore();
+
+      if (dist < 5) {
+        ctx.fillStyle = '#ffcc00';
+        ctx.font = `${Math.max(8, size*0.1)}px monospace`;
+        ctx.textAlign = 'center';
+        ctx.fillText(e.name, screenX, top - 6);
+      }
+    }
+  }
+
+  function renderWeapon() {
+    const bobY = Math.sin(performance.now()/150) * 4 * (swingTimer > 0 ? 0 : 1);
+    const swingOffset = swingTimer > 0 ? (20 - swingTimer) * 4 : 0;
+    ctx.save();
+    ctx.translate(W/2 + 80 - swingOffset, H - 40 + bobY);
+    ctx.rotate(swingTimer > 0 ? -0.6 + (swingTimer/20)*0.6 : 0);
+    // rubank (handhyvel) - enkel form
+    ctx.fillStyle = '#8a5a2b';
+    ctx.fillRect(-90, -18, 130, 30);
+    ctx.fillStyle = '#3a3a3a';
+    ctx.fillRect(-70, -22, 20, 40);
+    ctx.fillStyle = '#c9a86b';
+    ctx.fillRect(-95, -10, 20, 14);
+    ctx.restore();
+  }
+
+  function renderHUD() {
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(0, H-28, W, 28);
+    ctx.fillStyle = '#0f0';
+    ctx.font = 'bold 14px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText('HÄLSA: ' + Math.ceil(health), 10, H-9);
+    ctx.fillStyle = '#ffcc00';
+    ctx.fillText('POÄNG: ' + score, 160, H-9);
+    const remaining = enemies.filter(e => e.alive).length;
+    ctx.fillStyle = '#ff8800';
+    ctx.fillText('TRÄBITAR KVAR: ' + remaining, 320, H-9);
+    ctx.fillStyle = '#66ccff';
+    ctx.fillText('MÅL: nå dörren (grön ruta på kartan)', 10, H-9-16 < 0 ? 0 : 0);
+
+    // meddelanden
+    ctx.font = 'bold 16px monospace';
+    ctx.textAlign = 'center';
+    messages.forEach((m, i) => {
+      ctx.fillStyle = `rgba(255,204,0,${Math.min(1, m.life/30)})`;
+      ctx.fillText(m.text, W/2, 40 + i*22);
+    });
+
+    // hälsoflash
+    if (hurtFlash > 0) {
+      ctx.fillStyle = `rgba(255,0,0,${hurtFlash/30})`;
+      ctx.fillRect(0,0,W,H);
+    }
+
+    // mini-map
+    const mmSize = 6;
+    const mmX = W - MAPW*mmSize - 10, mmY = 10;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(mmX-4, mmY-4, MAPW*mmSize+8, MAPH*mmSize+8);
+    for (let y=0; y<MAPH; y++) {
+      for (let x=0; x<MAPW; x++) {
+        const v = map[y][x];
+        ctx.fillStyle = v===1 ? '#555' : (v===2 ? '#0f0' : '#222');
+        ctx.fillRect(mmX+x*mmSize, mmY+y*mmSize, mmSize-1, mmSize-1);
+      }
+    }
+    enemies.forEach(e => {
+      if (!e.alive) return;
+      ctx.fillStyle = '#f00';
+      ctx.fillRect(mmX+e.x*mmSize-2, mmY+e.y*mmSize-2, 4, 4);
+    });
+    ctx.fillStyle = '#0ff';
+    ctx.save();
+    ctx.translate(mmX+player.x*mmSize, mmY+player.y*mmSize);
+    ctx.rotate(player.dir);
+    ctx.beginPath();
+    ctx.moveTo(5,0); ctx.lineTo(-4,4); ctx.lineTo(-4,-4); ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function loop(t) {
+    const dt = Math.min(0.05, (t - lastTime) / 1000);
+    lastTime = t;
+    update(dt);
+    if (gameState === 'playing') {
+      renderScene();
+      renderHUD();
+    }
+    requestAnimationFrame(loop);
+  }
+
+  function showEndScreen(won) {
+    if (document.pointerLockElement) document.exitPointerLock();
+    setTimeout(() => {
+      overlay.classList.remove('hidden');
+      overlay.innerHTML = won ? `
+        <h1 style="color:#0f0">LEKTIONEN RÄDDAD!</h1>
+        <p>Du nådde lärarrummet med rubanken höjd i triumf.<br>
+        SLUTPOÄNG: <b>${score}</b><br>Rektorn ler äntligen.</p>
+        <div>
+          <button id="restartBtn">HYVLA IGEN</button>
+          <button id="menuBtn">TILL STARTSKÄRMEN</button>
+        </div>
+      ` : `
+        <h1 style="color:#f00">TRÄ-TORE FÄLLDES</h1>
+        <p>Träbitarna vann denna gång...<br>
+        SLUTPOÄNG: <b>${score}</b><br>Slöjdsalen sörjer.</p>
+        <div>
+          <button id="restartBtn">FÖRSÖK IGEN</button>
+          <button id="menuBtn">TILL STARTSKÄRMEN</button>
+        </div>
+      `;
+      document.getElementById('restartBtn').addEventListener('click', startGame);
+      document.getElementById('menuBtn').addEventListener('click', backToMenu);
+    }, 600);
+  }
+
+  function backToMenu() {
+    gameState = 'menu';
+    overlay.innerHTML = menuHTML;
+    overlay.classList.remove('hidden');
+    const newStartBtn = document.getElementById('startBtn');
+    // markera det senast använda styrningsalternativet som förvalt
+    const radios = document.querySelectorAll('input[name="controlScheme"]');
+    radios.forEach(r => { r.checked = (r.value === controlScheme); });
+    newStartBtn.addEventListener('click', startGame);
+  }
+
+  function startGame() {
+    const scheme = document.querySelector('input[name="controlScheme"]:checked');
+    if (scheme) controlScheme = scheme.value;
+    player.x = 4.5; player.y = 4.5; player.dir = 0;
+    health = 100; score = 0; messages = [];
+    spawnEnemies();
+    spawnProps();
+    gameState = 'playing';
+    overlay.classList.add('hidden');
+    if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+    startMusic();
+  }
+
+  startBtn.addEventListener('click', startGame);
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
