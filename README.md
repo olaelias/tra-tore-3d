@@ -1,5 +1,5 @@
 # TRÄ-TORE 3D
-screenshot.png
+![Screenshot](screenshot.png)
 A Duke Nukem 3D-inspired parody game built entirely in a single HTML file.
  
 TRÄ-TORE 3D started as a simple experiment:
