@@ -1,6 +1,7 @@
 # TRÄ-TORE 3D
 ![Screenshot](screenshot.png)
 🎮 **Play Online:** https://olaelias.github.io/tra-tore-3d/
+
 A Duke Nukem 3D-inspired parody game built entirely in a single HTML file.
  
 TRÄ-TORE 3D started as a simple experiment:
